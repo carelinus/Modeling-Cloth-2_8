@@ -28,12 +28,10 @@
 
 
 """Bug list"""
+# if a subsurf modifier is on the cloth, the grab tool freaks
 
 # updates to addons
 # https://www.youtube.com/watch?v=Mjy-zGG3Wk4
-
-# change log:
-# added ob.to_mesh_clear() 6/3/2019 on collider in two places
 
 
 bl_info = {
@@ -105,10 +103,10 @@ def triangulate(me, cloth=None):
     # Identify bend spring groups. Each edge gets paired with two points on tips of tris around edge    
     # Restricted to edges with two linked faces on a triangulated version of the mesh
 
-    "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+    #"!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
     #cloth = None #!!!!!!!!!!!!!!!!!!!!!
-    "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"    
-    print("new=======================================")
+    #"!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"    
+    #print("new=======================================")
     if cloth is not None:
         link_ed = [e for e in obm.edges if len(e.link_faces) == 2]
         # exclude pinned: (pin bool is those verts that are not pinned)
@@ -266,7 +264,10 @@ def get_last_object():
     """Finds cloth objects for keeping settings active
     while selecting other objects like pins"""
     cloths = [i for i in bpy.data.objects if i.modeling_cloth] # so we can select an empty and keep the settings menu up
-    if bpy.context.active_object is None:
+    if "object" not in dir(bpy.context):
+        return
+    
+    if bpy.context.object is None:
         return
     
     if bpy.context.active_object.modeling_cloth:
@@ -634,7 +635,9 @@ def get_spring_mix(ob, eidx):
 
 def update_pin_group():
     """Updates the cloth data after changing mesh or vertex weight pins"""
-    create_instance(new=False)
+    ob = get_last_object()[1]
+    if ob.name in data:
+        create_instance(new=False)
 
 
 def collision_data_update(self, context):
@@ -746,8 +749,13 @@ def q_rotate(co, w, axis):
 
 def bend_springs(cloth, co, measure=None):
     bend_eidx, tips = cloth.bend_eidx, cloth.bend_tips
-
+    
+    # if we have no springs...
+    if tips.shape[0] < 1:
+        return
+    
     tips_co = co[tips]
+    
     bls, brs = bend_eidx[:,0], bend_eidx[:, 1]
     b_oris = co[bls]
     
@@ -1900,10 +1908,14 @@ def object_collide(cloth, object):
     #   cloth.col_idx = np.array([], dtype=np.int32)
     #   cloth.re_col = np.empty((0,3), dtype=np.float32)
     
-    dp = bpy.context.evaluated_depsgraph_get()
-    proxy = object.ob.evaluated_get(dp).data
-    proxy_in_place(object, proxy)
+    #proxy = object.ob.to_mesh(bpy.context.evaluated_depsgraph_get(), True, calc_undeformed=False)
+    dg = object.dg
     
+    #proxy = object.ob.to_mesh()
+    proxy = object.ob.evaluated_get(dg).data
+    
+    
+    proxy_in_place(object, proxy)
     apply_in_place(cloth.ob, cloth.co, cloth)
 
     inner_margin = object.ob.modeling_cloth_inner_margin
@@ -1977,6 +1989,7 @@ def object_collide(cloth, object):
                         
     object.vel[:] = object.co    
     revert_in_place(cloth.ob, cloth.co)
+    #bpy.data.meshes.remove(proxy)
 
 
 # self collider =============================================
@@ -2047,9 +2060,12 @@ def create_collider():
     col = Collider()
     col.ob = bpy.context.active_object
 
+    dg = bpy.context.evaluated_depsgraph_get()
+    col.dg = dg
     # get proxy
-    dp = bpy.context.evaluated_depsgraph_get()
-    proxy = col.ob.evaluated_get(dp).data
+    #proxy = col.ob.to_mesh(bpy.context.evaluated_depsgraph_get(), True, calc_undeformed=False)
+    #proxy = col.ob.to_mesh()
+    proxy = col.ob.evaluated_get(dg).data
     
     col.co = get_proxy_co(col.ob, None, proxy)
     col.idxer = np.arange(col.co.shape[0], dtype=np.int32)
@@ -2062,7 +2078,9 @@ def create_collider():
     proxy_v_normals_in_place(col, True, proxy)
     marginalized = col.co + col.v_normals * col.ob.modeling_cloth_outer_margin
     col.cross_vecs, col.origins, col.normals = get_tri_normals(marginalized[col.tridex])    
-
+    
+    # remove proxy
+    #bpy.data.meshes.remove(proxy, do_unlink=True, do_id_user=True, do_ui_user=True)
     return col
 
 
@@ -2250,9 +2268,20 @@ def global_setup():
 
 
 def init_cloth(self, context):
+    """!!!! This runs once for evey object in the scene !!!!"""
     global data, extra_data
-    data = bpy.context.scene.modeling_cloth_data_set
-    extra_data = bpy.context.scene.modeling_cloth_data_set_extra
+    
+    sce = bpy.context.scene
+    if sce is None:
+        print("scene was None !!!!!!!!!!!!!!!!!!!!!!")
+        print("scene was None !!!!!!!!!!!!!!!!!!!!!!")
+        print("scene was None !!!!!!!!!!!!!!!!!!!!!!")
+        return
+    
+    data = sce.modeling_cloth_data_set
+    extra_data = sce.modeling_cloth_data_set_extra
+    extra_data['colliders'] = None
+    
     extra_data['alert'] = False
     extra_data['drag_alert'] = False
     extra_data['last_object'] = self
@@ -2268,11 +2297,21 @@ def init_cloth(self, context):
         cloth = create_instance() # generate an instance of the class
         data[cloth.name] = cloth  # store class in dictionary using the object name as a key
     
-    cull = [] # can't delete dict items while iterating
-    for i, value in data.items():
-        if not value.ob.modeling_cloth:
-            cull.append(i) # store keys to delete
+    remove = False    
 
+    cull = [] # can't delete dict items while iterating
+    
+    # check if item is still in scene and not deleted by user.
+    for i, value in data.items():
+        if i not in bpy.data.objects:
+            remove = True
+            cull.append(i)
+        
+        if not remove:    
+            if not value.ob.modeling_cloth:
+                cull.append(i) # store keys to delete
+        remove = False
+        
     for i in cull:
         del data[i]
 
@@ -2447,7 +2486,7 @@ class ModelingClothPin(bpy.types.Operator):
 
 # drag===================================
 # drag===================================
-#[‘DEFAULT’, ‘NONE’, ‘WAIT’, ‘CROSSHAIR’, ‘MOVE_X’, ‘MOVE_Y’, ‘KNIFE’, ‘TEXT’, ‘PAINT_BRUSH’, ‘HAND’, ‘SCROLL_X’, ‘SCROLL_Y’, ‘SCROLL_XY’, ‘EYEDROPPER’]
+#[â€˜DEFAULTâ€™, â€˜NONEâ€™, â€˜WAITâ€™, â€˜CROSSHAIRâ€™, â€˜MOVE_Xâ€™, â€˜MOVE_Yâ€™, â€˜KNIFEâ€™, â€˜TEXTâ€™, â€˜PAINT_BRUSHâ€™, â€˜HANDâ€™, â€˜SCROLL_Xâ€™, â€˜SCROLL_Yâ€™, â€˜SCROLL_XYâ€™, â€˜EYEDROPPERâ€™]
 
 def main_drag(context, event):
     # get the context arguments
@@ -2942,7 +2981,7 @@ class ModelingClothPanel(bpy.types.Panel):
         col = layout.column(align=True)
         col.label(text='Support Addons')
         col.operator("object.modeling_cloth_donate", text="Donate")
-        col.operator("object.modeling_cloth_collision_series", text="By Books")
+        col.operator("object.modeling_cloth_collision_series", text="Buy Books")
         #col.operator("object.modeling_cloth_collision_series_kindle", text="Kindle")
         
         # tools
@@ -3066,7 +3105,7 @@ class ModelingClothPanel(bpy.types.Panel):
                 col.label(text='Support Addons')
                 #col.operator("object.modeling_cloth_collision_series_kindle", text="Kindle")
                 col.operator("object.modeling_cloth_donate", text="Donate")
-                col.operator("object.modeling_cloth_collision_series", text="By Books")
+                col.operator("object.modeling_cloth_collision_series", text="Buy Books")
 
 
 class CollisionSeries(bpy.types.Operator):
